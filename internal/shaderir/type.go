@@ -16,6 +16,7 @@ package shaderir
 
 import (
 	"fmt"
+	"go/constant"
 	"strings"
 )
 
@@ -261,5 +262,100 @@ func (p *Program) LocalVariableType(topBlock, block *Block, idx int) Type {
 		}
 	default:
 		return localVariableType(p, topBlock, block, idx)
+	}
+}
+
+// ExprType returns the type of the expression e resolved in the scope of topBlock and
+// block. The returned type is never the untyped None: constants are resolved to their
+// basic type. The backends use this to tell integer divisions and shifts apart from
+// floating-point ones, so only the expression kinds reachable as operands of a binary
+// operator need full support.
+func (p *Program) ExprType(topBlock, block *Block, e Expr) Type {
+	switch e.Type {
+	case NumberExpr:
+		switch e.Const.Kind() {
+		case constant.Bool:
+			return Type{Main: Bool}
+		case constant.Int:
+			return Type{Main: Int}
+		case constant.Float:
+			return Type{Main: Float}
+		}
+		return Type{Main: None}
+	case UniformVariable:
+		return p.Uniforms[e.Index]
+	case LocalVariable:
+		return p.LocalVariableType(topBlock, block, e.Index)
+	case Unary:
+		return p.ExprType(topBlock, block, e.Exprs[0])
+	case Binary:
+		// Operands are already resolved to concrete types, so pass nil constants: the
+		// untyped-constant branches of TypeFromBinaryOp are not taken from here.
+		if t, ok := TypeFromBinaryOp(e.Op,
+			p.ExprType(topBlock, block, e.Exprs[0]),
+			p.ExprType(topBlock, block, e.Exprs[1]),
+			nil, nil); ok {
+			return t
+		}
+		return Type{Main: None}
+	case Selection:
+		return p.ExprType(topBlock, block, e.Exprs[1])
+	case FieldSelector:
+		base := p.ExprType(topBlock, block, e.Exprs[0])
+		swizzling := e.Exprs[1].Swizzling
+		t := base
+		switch base.Main {
+		case Vec2, Vec3, Vec4:
+			switch len(swizzling) {
+			case 1:
+				t = Type{Main: Float}
+			case 2:
+				t = Type{Main: Vec2}
+			case 3:
+				t = Type{Main: Vec3}
+			case 4:
+				t = Type{Main: Vec4}
+			}
+		case IVec2, IVec3, IVec4:
+			switch len(swizzling) {
+			case 1:
+				t = Type{Main: Int}
+			case 2:
+				t = Type{Main: IVec2}
+			case 3:
+				t = Type{Main: IVec3}
+			case 4:
+				t = Type{Main: IVec4}
+			}
+		}
+		return t
+	case Index:
+		t := p.ExprType(topBlock, block, e.Exprs[0])
+		switch t.Main {
+		case Vec2, Vec3, Vec4:
+			return Type{Main: Float}
+		case IVec2, IVec3, IVec4:
+			return Type{Main: Int}
+		case Mat2:
+			return Type{Main: Vec2}
+		case Mat3:
+			return Type{Main: Vec3}
+		case Mat4:
+			return Type{Main: Vec4}
+		case Array:
+			return t.Sub[0]
+		}
+		return Type{Main: None}
+	case Call:
+		// A call to a user function is the first sub-expression. Built-in function calls are
+		// not valid operands of integer shifts, but their result types are still resolvable
+		// through the same function lookup only for user functions.
+		callee := e.Exprs[0]
+		if callee.Type == FunctionExpr && callee.Index < len(p.Funcs) {
+			return p.Funcs[callee.Index].Return
+		}
+		return Type{Main: None}
+	default:
+		return Type{Main: None}
 	}
 }

@@ -85,6 +85,94 @@ int3 sign(int3 x) {
 
 int4 sign(int4 x) {
 	return int4(x > 0) - int4(x < 0);
+}
+
+// divInt is a truncated integer division matching Go's '/' operator. A zero divisor
+// returns zero, and INT_MIN / -1 returns INT_MIN, instead of relying on the hardware's
+// undefined overflow. The vector overloads take either a scalar or a per-component
+// divisor. metal::min and metal::clamp accept both scalar and vector operands.
+int divInt(int x, int y) {
+	if (y == 0) {
+		return 0;
+	}
+	if (y == -1 && x == (-2147483647 - 1)) {
+		return x;
+	}
+	return x / y;
+}
+
+template<int N>
+vec<int, N> divInt(vec<int, N> x, int y) {
+	if (y == 0) {
+		return vec<int, N>(0);
+	}
+	if (y == -1) {
+		for (int i = 0; i < N; i++) {
+			if (x[i] == (-2147483647 - 1)) {
+				// Keep INT_MIN instead of the overflowed native division.
+				continue;
+			}
+			x[i] = x[i] / y;
+		}
+		return x;
+	}
+	return x / y;
+}
+
+template<int N>
+vec<int, N> divInt(vec<int, N> x, vec<int, N> y) {
+	for (int i = 0; i < N; i++) {
+		x[i] = divInt(x[i], y[i]);
+	}
+	return x;
+}
+
+// modInt is a truncated modulo matching Go's '%' operator, built on divInt so the
+// zero-divisor and minimum-integer cases stay defined.
+int modInt(int x, int y) {
+	return x - y * divInt(x, y);
+}
+
+template<int N>
+vec<int, N> modInt(vec<int, N> x, int y) {
+	return x - y * divInt(x, y);
+}
+
+template<int N>
+vec<int, N> modInt(vec<int, N> x, vec<int, N> y) {
+	return x - y * divInt(x, y);
+}
+
+// shiftLeftInt and shiftRightInt implement Go's shift operators. Go defines shifts with
+// a count of 32 bits or more as zero, whereas Metal only takes the low five bits. The
+// count is clamped to [0, 32]; left shifts go through uint to avoid undefined behavior on
+// negative signed values, right shifts stay signed to keep the arithmetic shift.
+int shiftLeftInt(int x, int count) {
+	return as_type<int>(as_type<uint>(x) << uint(min(max(count, 0), 32)));
+}
+
+template<int N>
+vec<int, N> shiftLeftInt(vec<int, N> x, int count) {
+	return as_type<vec<int, N>>(as_type<vec<uint, N>>(x) << vec<uint, N>(uint(min(max(count, 0), 32))));
+}
+
+template<int N>
+vec<int, N> shiftLeftInt(vec<int, N> x, vec<int, N> count) {
+	return as_type<vec<int, N>>(as_type<vec<uint, N>>(x) << clamp(as_type<vec<uint, N>>(count), vec<uint, N>(0), vec<uint, N>(32)));
+}
+
+int shiftRightInt(int x, int count) {
+	return x >> min(max(count, 0), 32);
+}
+
+template<int N>
+vec<int, N> shiftRightInt(vec<int, N> x, int count) {
+	return x >> min(max(count, 0), 32);
+}
+
+template<int N>
+vec<int, N> shiftRightInt(vec<int, N> x, vec<int, N> count) {
+	return x >> clamp(count, vec<int, N>(0), vec<int, N>(32));
 }`
 }
 
@@ -443,15 +531,30 @@ func (c *compileContext) block(p *shaderir.Program, topBlock, block *shaderir.Bl
 			}
 			return fmt.Sprintf("%s(%s)", op, expr(&e.Exprs[0]))
 		case shaderir.Binary:
+			lhs := expr(&e.Exprs[0])
+			rhs := expr(&e.Exprs[1])
 			switch e.Op {
 			case shaderir.VectorEqualOp:
-				return fmt.Sprintf("all((%s) == (%s))", expr(&e.Exprs[0]), expr(&e.Exprs[1]))
+				return fmt.Sprintf("all((%s) == (%s))", lhs, rhs)
 			case shaderir.VectorNotEqualOp:
-				return fmt.Sprintf("!all((%s) == (%s))", expr(&e.Exprs[0]), expr(&e.Exprs[1]))
+				return fmt.Sprintf("!all((%s) == (%s))", lhs, rhs)
+			case shaderir.ModOp:
+				// Route through modInt so integer modulo keeps Go's truncated semantics,
+				// including the zero-divisor and minimum-integer cases.
+				return fmt.Sprintf("modInt((%s), (%s))", lhs, rhs)
+			case shaderir.Div:
+				// Only integer divisions need Go-compatible handling.
+				if t := p.ExprType(topBlock, block, e.Exprs[0]); t.Main == shaderir.Int || t.IsIntVector() {
+					return fmt.Sprintf("divInt((%s), (%s))", lhs, rhs)
+				}
+			case shaderir.LeftShift:
+				return fmt.Sprintf("shiftLeftInt((%s), (%s))", lhs, rhs)
+			case shaderir.RightShift:
+				return fmt.Sprintf("shiftRightInt((%s), (%s))", lhs, rhs)
 			case shaderir.AndNot:
-				return fmt.Sprintf("(%s) & ~(%s)", expr(&e.Exprs[0]), expr(&e.Exprs[1]))
+				return fmt.Sprintf("(%s) & ~(%s)", lhs, rhs)
 			}
-			return fmt.Sprintf("(%s) %s (%s)", expr(&e.Exprs[0]), opString(e.Op), expr(&e.Exprs[1]))
+			return fmt.Sprintf("(%s) %s (%s)", lhs, opString(e.Op), rhs)
 		case shaderir.Selection:
 			return fmt.Sprintf("(%s) ? (%s) : (%s)", expr(&e.Exprs[0]), expr(&e.Exprs[1]), expr(&e.Exprs[2]))
 		case shaderir.Call:

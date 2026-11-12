@@ -32,33 +32,153 @@ const (
 	GLSLVersionES300
 )
 
-// utilFunctions contains GLSL utility functions for old GLSL versions.
-const utilFunctions = `int modInt(int x, int y) {
-	return x - y*(x/y);
+// utilFunctions contains GLSL utility functions that make integer operations match Go's
+// semantics on every backend. See internal/shaderir/doc/INTEGER_OPS.md for the rationale.
+const utilFunctions = `// modInt is a truncated modulo like Go's '%' operator. It is built on divInt so the
+// zero-divisor and minimum-integer cases stay defined on every backend.
+int modInt(int x, int y) {
+	return x - y*divInt(x, y);
 }
 
 ivec2 modInt(ivec2 x, int y) {
-	return x - y*(x/y);
+	return x - y*divInt(x, y);
 }
 
 ivec3 modInt(ivec3 x, int y) {
-	return x - y*(x/y);
+	return x - y*divInt(x, y);
 }
 
 ivec4 modInt(ivec4 x, int y) {
-	return x - y*(x/y);
+	return x - y*divInt(x, y);
 }
 
 ivec2 modInt(ivec2 x, ivec2 y) {
-	return x - y*(x/y);
+	return x - y*divInt(x, y);
 }
 
 ivec3 modInt(ivec3 x, ivec3 y) {
-	return x - y*(x/y);
+	return x - y*divInt(x, y);
 }
 
 ivec4 modInt(ivec4 x, ivec4 y) {
-	return x - y*(x/y);
+	return x - y*divInt(x, y);
+}
+
+// divInt is a truncated integer division like Go's '/' operator. The y == -1 and
+// x == INT_MIN case is defined in Go (the result is INT_MIN) even though the native
+// division instruction overflows, and a zero divisor is defined to return zero instead
+// of invoking the GPU's undefined behavior.
+int divInt(int x, int y) {
+	if (y == 0) {
+		return 0;
+	}
+	if (y == -1 && x == (-2147483647 - 1)) {
+		return x;
+	}
+	return x / y;
+}
+
+ivec2 divInt(ivec2 x, int y) {
+	if (y == 0) {
+		return ivec2(0);
+	}
+	if (y == -1) {
+		return ivec2(x.x == (-2147483647 - 1) ? x.x : x.x / y, x.y == (-2147483647 - 1) ? x.y : x.y / y);
+	}
+	return x / y;
+}
+
+ivec3 divInt(ivec3 x, int y) {
+	if (y == 0) {
+		return ivec3(0);
+	}
+	if (y == -1) {
+		return ivec3(x.x == (-2147483647 - 1) ? x.x : x.x / y, x.y == (-2147483647 - 1) ? x.y : x.y / y, x.z == (-2147483647 - 1) ? x.z : x.z / y);
+	}
+	return x / y;
+}
+
+ivec4 divInt(ivec4 x, int y) {
+	if (y == 0) {
+		return ivec4(0);
+	}
+	if (y == -1) {
+		return ivec4(x.x == (-2147483647 - 1) ? x.x : x.x / y, x.y == (-2147483647 - 1) ? x.y : x.y / y, x.z == (-2147483647 - 1) ? x.z : x.z / y, x.w == (-2147483647 - 1) ? x.w : x.w / y);
+	}
+	return x / y;
+}
+
+ivec2 divInt(ivec2 x, ivec2 y) {
+	return ivec2(y.x == 0 ? 0 : (y.x == -1 && x.x == (-2147483647 - 1) ? x.x : x.x / y.x), y.y == 0 ? 0 : (y.y == -1 && x.y == (-2147483647 - 1) ? x.y : x.y / y.y));
+}
+
+ivec3 divInt(ivec3 x, ivec3 y) {
+	return ivec3(y.x == 0 ? 0 : (y.x == -1 && x.x == (-2147483647 - 1) ? x.x : x.x / y.x), y.y == 0 ? 0 : (y.y == -1 && x.y == (-2147483647 - 1) ? x.y : x.y / y.y), y.z == 0 ? 0 : (y.z == -1 && x.z == (-2147483647 - 1) ? x.z : x.z / y.z));
+}
+
+ivec4 divInt(ivec4 x, ivec4 y) {
+	return ivec4(y.x == 0 ? 0 : (y.x == -1 && x.x == (-2147483647 - 1) ? x.x : x.x / y.x), y.y == 0 ? 0 : (y.y == -1 && x.y == (-2147483647 - 1) ? x.y : x.y / y.y), y.z == 0 ? 0 : (y.z == -1 && x.z == (-2147483647 - 1) ? x.z : x.z / y.z), y.w == 0 ? 0 : (y.w == -1 && x.w == (-2147483647 - 1) ? x.w : x.w / y.w));
+}
+
+// shiftLeftInt and shiftRightInt implement Go's shift operators. Go defines shifts with
+// a count of 32 bits or more as zero, whereas GLSL leaves such shifts (and negative
+// signed left shifts) undefined. The count is clamped to [0, 32] so every backend gets
+// the same defined result. Left shifts go through uint to avoid undefined behavior on
+// negative signed values; right shifts stay signed to keep the arithmetic shift.
+int shiftLeftInt(int x, int count) {
+	return int(uint(x) << uint(clamp(count, 0, 32)));
+}
+
+ivec2 shiftLeftInt(ivec2 x, int count) {
+	return ivec2(uvec2(x) << uvec2(uint(clamp(count, 0, 32))));
+}
+
+ivec3 shiftLeftInt(ivec3 x, int count) {
+	return ivec3(uvec3(x) << uvec3(uint(clamp(count, 0, 32))));
+}
+
+ivec4 shiftLeftInt(ivec4 x, int count) {
+	return ivec4(uvec4(x) << uvec4(uint(clamp(count, 0, 32))));
+}
+
+ivec2 shiftLeftInt(ivec2 x, ivec2 count) {
+	return ivec2(uvec2(x) << clamp(uvec2(count), uvec2(0), uvec2(32)));
+}
+
+ivec3 shiftLeftInt(ivec3 x, ivec3 count) {
+	return ivec3(uvec3(x) << clamp(uvec3(count), uvec3(0), uvec3(32)));
+}
+
+ivec4 shiftLeftInt(ivec4 x, ivec4 count) {
+	return ivec4(uvec4(x) << clamp(uvec4(count), uvec4(0), uvec4(32)));
+}
+
+int shiftRightInt(int x, int count) {
+	return x >> clamp(count, 0, 32);
+}
+
+ivec2 shiftRightInt(ivec2 x, int count) {
+	return x >> clamp(count, 0, 32);
+}
+
+ivec3 shiftRightInt(ivec3 x, int count) {
+	return x >> clamp(count, 0, 32);
+}
+
+ivec4 shiftRightInt(ivec4 x, int count) {
+	return x >> clamp(count, 0, 32);
+}
+
+ivec2 shiftRightInt(ivec2 x, ivec2 count) {
+	return x >> clamp(ivec2(count), ivec2(0), ivec2(32));
+}
+
+ivec3 shiftRightInt(ivec3 x, ivec3 count) {
+	return x >> clamp(ivec3(count), ivec3(0), ivec3(32));
+}
+
+ivec4 shiftRightInt(ivec4 x, ivec4 count) {
+	return x >> clamp(ivec4(count), ivec4(0), ivec4(32));
 }`
 
 func VertexPrelude(version GLSLVersion) string {
@@ -66,7 +186,7 @@ func VertexPrelude(version GLSLVersion) string {
 	case GLSLVersionDefault:
 		return `#version 150` + "\n\n" + utilFunctions
 	case GLSLVersionES300:
-		return `#version 300 es`
+		return `#version 300 es` + "\n\n" + utilFunctions
 	}
 	return ""
 }
@@ -89,9 +209,7 @@ precision highp int;
 #endif
 
 out vec4 fragColor;`
-	if version == GLSLVersionDefault {
-		prelude += "\n\n" + utilFunctions
-	}
+	prelude += "\n\n" + utilFunctions
 	return prelude
 }
 
@@ -534,14 +652,27 @@ func (c *compileContext) block(p *shaderir.Program, topBlock, block *shaderir.Bl
 			}
 			return fmt.Sprintf("%s(%s)", op, expr(&e.Exprs[0]))
 		case shaderir.Binary:
-			if e.Op == shaderir.ModOp && c.version == GLSLVersionDefault {
-				// '%' is not defined.
-				return fmt.Sprintf("modInt((%s), (%s))", expr(&e.Exprs[0]), expr(&e.Exprs[1]))
+			lhs := expr(&e.Exprs[0])
+			rhs := expr(&e.Exprs[1])
+			switch e.Op {
+			case shaderir.ModOp:
+				// Route every version through modInt so that integer modulo keeps Go's
+				// truncated semantics, including the zero-divisor and minimum-integer cases.
+				return fmt.Sprintf("modInt((%s), (%s))", lhs, rhs)
+			case shaderir.Div:
+				// Only integer divisions need Go-compatible handling. A floating-point or
+				// matrix division keeps the native '/' operator.
+				if t := p.ExprType(topBlock, block, e.Exprs[0]); t.Main == shaderir.Int || t.IsIntVector() {
+					return fmt.Sprintf("divInt((%s), (%s))", lhs, rhs)
+				}
+			case shaderir.LeftShift:
+				return fmt.Sprintf("shiftLeftInt((%s), (%s))", lhs, rhs)
+			case shaderir.RightShift:
+				return fmt.Sprintf("shiftRightInt((%s), (%s))", lhs, rhs)
+			case shaderir.AndNot:
+				return fmt.Sprintf("(%s) & ~(%s)", lhs, rhs)
 			}
-			if e.Op == shaderir.AndNot {
-				return fmt.Sprintf("(%s) & ~(%s)", expr(&e.Exprs[0]), expr(&e.Exprs[1]))
-			}
-			return fmt.Sprintf("(%s) %s (%s)", expr(&e.Exprs[0]), opString(e.Op), expr(&e.Exprs[1]))
+			return fmt.Sprintf("(%s) %s (%s)", lhs, opString(e.Op), rhs)
 		case shaderir.Selection:
 			return fmt.Sprintf("(%s) ? (%s) : (%s)", expr(&e.Exprs[0]), expr(&e.Exprs[1]), expr(&e.Exprs[2]))
 		case shaderir.Call:

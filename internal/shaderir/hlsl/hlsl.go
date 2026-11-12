@@ -55,18 +55,30 @@ func (c *compileContext) structName(p *shaderir.Program, t *shaderir.Type) strin
 // the shader IR have no side effects: there are no pointers or writable global variables,
 // and a call to a function with output parameters is always a statement rather than a part
 // of an expression.
-const utilFuncs = `// mod and modInt are macros rather than functions. Some HLSL compilers cannot
+const utilFuncs = `// mod and the integer helpers are macros rather than functions. Some HLSL compilers cannot
 // resolve overloads on the vector size, as a scalar argument is implicitly convertible
 // to any vector type (#3356).
 
 // mod is a floored modulo like GLSL's mod. HLSL's fmod is a truncated modulo.
 #define mod(x, y) ((x) - (y) * floor((x) / (y)))
 
-// modInt is a truncated modulo like the '%' operator. fxc emits warning X3556 for signed
-// integer % and /, and suggests uints, so the magnitude is computed with unsigned modulo
-// and the sign of the dividend is reapplied. This matches '%' except for the minimum
-// integer, where abs overflows.
-#define modInt(x, y) (sign(x) * asint(asuint(abs(x)) % asuint(abs(y))))
+// divInt is a truncated integer division matching Go's '/' operator. A zero divisor
+// returns zero, and INT_MIN / -1 returns INT_MIN, instead of relying on the hardware's
+// undefined overflow. The comparisons and the ternary work on int and intN alike.
+#define divInt(x, y) ((y) == 0 ? (x) * 0 : ((y) == -1 && (x) == (-2147483647 - 1) ? (x) : (x) / (y)))
+
+// modInt is a truncated modulo matching Go's '%' operator. It is built on divInt so the
+// zero-divisor and minimum-integer cases stay defined, avoiding fxc's warning X3556 for
+// signed integer division.
+#define modInt(x, y) ((x) - (y) * divInt((x), (y)))
+
+// shiftLeftInt and shiftRightInt implement Go's shift operators. Go defines shifts with
+// a count of 32 bits or more as zero, whereas HLSL only takes the low five bits. The
+// count is clamped to [0, 32]; left shifts go through uint to avoid undefined behavior on
+// negative signed values, right shifts stay signed to keep the arithmetic shift.
+// clamp, min, asuint and asint accept both scalar and vector operands.
+#define shiftLeftInt(x, count) (asint(asuint(x) << clamp(asuint(count), 0u, 32u)))
+#define shiftRightInt(x, count) ((x) >> clamp(count, 0, 32))
 
 float2x2 float2x2FromScalar(float x) {
 	return float2x2(x, 0, 0, x);
@@ -468,22 +480,34 @@ func (c *compileContext) block(p *shaderir.Program, topBlock, block *shaderir.Bl
 			}
 			return fmt.Sprintf("%s(%s)", op, expr(&e.Exprs[0]))
 		case shaderir.Binary:
+			lhs := expr(&e.Exprs[0])
+			rhs := expr(&e.Exprs[1])
 			switch e.Op {
 			case shaderir.VectorEqualOp:
-				return fmt.Sprintf("all((%s) == (%s))", expr(&e.Exprs[0]), expr(&e.Exprs[1]))
+				return fmt.Sprintf("all((%s) == (%s))", lhs, rhs)
 			case shaderir.VectorNotEqualOp:
-				return fmt.Sprintf("!all((%s) == (%s))", expr(&e.Exprs[0]), expr(&e.Exprs[1]))
+				return fmt.Sprintf("!all((%s) == (%s))", lhs, rhs)
 			case shaderir.MatrixMul:
 				// If either is a matrix, use the mul function.
 				// Swap the order of the lhs and the rhs since matrices are row-major in HLSL.
-				return fmt.Sprintf("mul(%s, %s)", expr(&e.Exprs[1]), expr(&e.Exprs[0]))
+				return fmt.Sprintf("mul(%s, %s)", rhs, lhs)
 			case shaderir.ModOp:
-				// Use modInt instead of '%' to avoid fxc's warning X3556 for signed integers.
-				return fmt.Sprintf("modInt((%s), (%s))", expr(&e.Exprs[0]), expr(&e.Exprs[1]))
+				// Use modInt instead of '%' to avoid fxc's warning X3556 for signed integers
+				// and to keep Go's truncated semantics.
+				return fmt.Sprintf("modInt((%s), (%s))", lhs, rhs)
+			case shaderir.Div:
+				// Only integer divisions need Go-compatible handling.
+				if t := p.ExprType(topBlock, block, e.Exprs[0]); t.Main == shaderir.Int || t.IsIntVector() {
+					return fmt.Sprintf("divInt((%s), (%s))", lhs, rhs)
+				}
+			case shaderir.LeftShift:
+				return fmt.Sprintf("shiftLeftInt((%s), (%s))", lhs, rhs)
+			case shaderir.RightShift:
+				return fmt.Sprintf("shiftRightInt((%s), (%s))", lhs, rhs)
 			case shaderir.AndNot:
-				return fmt.Sprintf("(%s) & ~(%s)", expr(&e.Exprs[0]), expr(&e.Exprs[1]))
+				return fmt.Sprintf("(%s) & ~(%s)", lhs, rhs)
 			}
-			return fmt.Sprintf("(%s) %s (%s)", expr(&e.Exprs[0]), opString(e.Op), expr(&e.Exprs[1]))
+			return fmt.Sprintf("(%s) %s (%s)", lhs, opString(e.Op), rhs)
 		case shaderir.Selection:
 			return fmt.Sprintf("(%s) ? (%s) : (%s)", expr(&e.Exprs[0]), expr(&e.Exprs[1]), expr(&e.Exprs[2]))
 		case shaderir.Call:

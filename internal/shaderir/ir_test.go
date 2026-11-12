@@ -1301,3 +1301,97 @@ func TestTypeFromBinaryOpUntypedIntConsts(t *testing.T) {
 		}
 	}
 }
+
+func TestExprType(t *testing.T) {
+	// Build a minimal program with one function whose block declares an int, a float and
+	// an ivec2 local variable. Local-variable indices are relative to the function block.
+	intType := shaderir.Type{Main: shaderir.Int}
+	floatType := shaderir.Type{Main: shaderir.Float}
+	iv2Type := shaderir.Type{Main: shaderir.IVec2}
+	block := &shaderir.Block{
+		LocalVars: []shaderir.Type{intType, floatType, iv2Type},
+	}
+	p := &shaderir.Program{
+		Funcs: []shaderir.Func{
+			{
+				// No InParams so the local-variable indices start at 0.
+				Index:  0,
+				Return: intType,
+				Block:  block,
+			},
+		},
+	}
+
+	intVar := shaderir.Expr{Type: shaderir.LocalVariable, Index: 0}
+	floatVar := shaderir.Expr{Type: shaderir.LocalVariable, Index: 1}
+	iv2Var := shaderir.Expr{Type: shaderir.LocalVariable, Index: 2}
+	intConst := shaderir.Expr{Type: shaderir.NumberExpr, Const: constant.MakeInt64(2)}
+	floatConst := shaderir.Expr{Type: shaderir.NumberExpr, Const: constant.MakeFloat64(1.5)}
+
+	cases := []struct {
+		name string
+		expr shaderir.Expr
+		want shaderir.Type
+	}{
+		{
+			name: "int constant",
+			expr: intConst,
+			want: intType,
+		},
+		{
+			name: "float constant",
+			expr: floatConst,
+			want: floatType,
+		},
+		{
+			name: "int local variable",
+			expr: intVar,
+			want: intType,
+		},
+		{
+			name: "integer division",
+			expr: shaderir.Expr{Type: shaderir.Binary, Op: shaderir.Div, Exprs: []shaderir.Expr{intVar, intConst}},
+			want: intType,
+		},
+		{
+			name: "float division",
+			expr: shaderir.Expr{Type: shaderir.Binary, Op: shaderir.Div, Exprs: []shaderir.Expr{floatVar, floatConst}},
+			want: floatType,
+		},
+		{
+			name: "left shift",
+			expr: shaderir.Expr{Type: shaderir.Binary, Op: shaderir.LeftShift, Exprs: []shaderir.Expr{intVar, intConst}},
+			want: intType,
+		},
+		{
+			name: "vector left shift by scalar",
+			expr: shaderir.Expr{Type: shaderir.Binary, Op: shaderir.LeftShift, Exprs: []shaderir.Expr{iv2Var, intVar}},
+			want: iv2Type,
+		},
+		{
+			name: "unary minus on int",
+			expr: shaderir.Expr{Type: shaderir.Unary, Op: shaderir.Sub, Exprs: []shaderir.Expr{intVar}},
+			want: intType,
+		},
+		{
+			name: "nested integer expression",
+			expr: shaderir.Expr{
+				Type: shaderir.Binary,
+				Op:   shaderir.Add,
+				Exprs: []shaderir.Expr{
+					{Type: shaderir.Binary, Op: shaderir.LeftShift, Exprs: []shaderir.Expr{intVar, intConst}},
+					{Type: shaderir.Binary, Op: shaderir.Div, Exprs: []shaderir.Expr{intVar, intConst}},
+				},
+			},
+			want: intType,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := p.ExprType(block, block, c.expr)
+			if !got.Equal(&c.want) {
+				t.Errorf("got: %s, want: %s", got.String(), c.want.String())
+			}
+		})
+	}
+}
